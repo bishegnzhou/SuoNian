@@ -1,0 +1,4 @@
+google-genai
+modal
+python-dotenv
+rich
