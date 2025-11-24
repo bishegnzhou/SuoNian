@@ -14,9 +14,8 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy backend code
-COPY *.py ./
-COPY .env.example ./
+# Copy all Python files from root (not recursively into venv)
+COPY api_server.py main.py agent.py orchestrator.py logger.py insights.py ./
 
 # Copy built frontend
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
