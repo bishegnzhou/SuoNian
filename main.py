@@ -102,7 +102,10 @@ def main():
             print_status("\nExperiment interrupted by user.", "bold red")
             sys.exit(0)
         except Exception as e:
+            import traceback
             print_status(f"\nFatal Error: {e}", "bold red")
+            print(f"[ERROR] Fatal Error: {e}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
             sys.exit(1)
     else:
         # Multi-agent orchestrator mode.
@@ -124,7 +127,10 @@ def main():
             print_status("\nOrchestrated experiment interrupted by user.", "bold red")
             sys.exit(0)
         except Exception as e:
+            import traceback
             print_status(f"\nFatal Error (orchestrator mode): {e}", "bold red")
+            print(f"[ERROR] Fatal Error (orchestrator): {e}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
             sys.exit(1)
 
 
