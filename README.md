@@ -1,66 +1,43 @@
-# AI Researcher
-[![Twitter Follow](https://img.shields.io/twitter/follow/mattshumer_?style=social)](https://twitter.com/mattshumer_)
+# AI Researcher (DeepSeek 深度优化版)
 
-[Be the first to know when I publish new AI builds + demos!](https://tally.so/r/w2M17p)
+> **致谢 / Attribution**
+> 本项目基于 [mshumer/autonomous-researcher](https://github.com/mshumer/autonomous-researcher) 二次开发。
+> 感谢原作者 Matt Shumer 的开源贡献。
 
-An autonomous AI researcher. It takes a research objective, breaks it into experiments, spins up separate agents with access to their own GPUs to run these experiments, and delivers a paper-style writeup with findings.
+## 📖 项目介绍
 
-## How it Works
-- Decomposes your prompt into experiments and assigns them to specialist researcher agents.
-- Each agent can launch GPU-enabled sandboxes to train models/run inference/etc., evaluate, and collect evidence.
-- Based on the results of these experiments, the orchestrator can decide to finalize, or run more experiments.
-- The orchestrator goes over all of the results and turns them into a coherent "paper".
+这是一个全自动的 AI 研究员助手。它能根据您给出的研究课题，自动拆解任务、联网搜索资料、阅读分析文献，最终生成一份专业的**中文研究报告**。
 
-## Run it (web notebook, one command)
-The fastest way to use it:
+**本项目针对 DeepSeek V3 和本地环境进行了深度优化：**
+
+*   🚀 **DeepSeek 驱动**：针对 DeepSeek V3 模型优化了提示词，确保输出高质量的简体中文报告。
+*   💻 **完全本地化**：默认支持本地运行（Local Sandbox），无需配置昂贵的 Modal 云端环境，零成本部署。
+*   📄 **一键导出 Word**：内置格式转换工具，可将生成的 Markdown 报告一键转换为排版精美的 Word 文档。
+*   🔧 **中文适配**：修复了 Windows 系统下的编码乱码问题，优化了中文显示体验。
+
+## 🚀 快速开始
+
+### 1. 安装依赖
+确保安装了 Python 3.10+，然后在终端运行：
+```bash
+pip install -r requirements.txt
 ```
+
+### 2. 配置密钥
+在项目根目录新建 `.env` 文件，填入您的 DeepSeek API Key：
+```env
+DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+### 3. 启动应用
+运行以下命令，一键启动后端和前端：
+```bash
 python run_app.py
 ```
-This installs missing deps, starts the API + frontend, and opens the notebook. If Google/Modal keys aren’t set, the UI will prompt you and save them locally before the run starts.
+启动成功后，浏览器会自动打开 `http://localhost:5173`。
 
-## Keys Needed
-- **LLM key** (at least one):
-  - Google AI Studio: `GOOGLE_API_KEY` (for Gemini 3 Pro)
-  - Anthropic: `ANTHROPIC_API_KEY` (for Claude Opus 4.5)
-- **Modal tokens**: `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` (for GPU sandboxes)
-- Add them to `.env` in the repo root, or paste them into the web prompt when asked.
+## 📝 使用指南
 
-## Model Selection
-Choose between **Gemini 3 Pro** and **Claude Opus 4.5** from the dropdown in the web UI, or via CLI with `--model`.
-
-## Optional CLI
-Prefer the terminal?
-```
-python -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
-python main.py "Does label smoothing improve ViT-Base on CIFAR-10?" --mode single --gpu any --model gemini-3-pro-preview
-```
-Orchestrator (multi-agent):
-```
-python main.py "Characterize scaling laws for sparse attention transformers" \
-  --mode orchestrator --num-agents 3 --max-rounds 3 --max-parallel 2 --gpu any
-```
-Dry run:
-```
-python main.py "Sanity check the pipeline" --mode orchestrator --test-mode
-```
-
-## Deploy to Railway
-
-[![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/new/template?template=https://github.com/mattshumer/ai-researcher&referralCode=mattshumer)
-
-**Steps:**
-1. Click the button above (or go to Railway and select "Deploy from GitHub repo")
-2. Connect your GitHub account and select this repo (or your fork)
-3. Railway will automatically detect the Dockerfile and build the app
-4. Once deployed, open the app URL and enter your API keys in the UI
-
-**Optional environment variables** (if you want server-side defaults):
-- `GOOGLE_API_KEY` - Google AI Studio key for Gemini 3 Pro
-- `ANTHROPIC_API_KEY` - Anthropic key for Claude Opus 4.5
-- `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` - For GPU sandboxes
-
-Note: Users can also enter their own keys directly in the web UI without setting environment variables.
-
-## Status/Contribution
-This is a super-early, experimental harness. There are a number of improvements to be worked out (i.e. dataset sharing between agents, key management, etc.), literature search, that would make this way more capable. If anyone wants to add these in, feel free!
+1.  **开始研究**：在网页输入框输入课题（如“2024年人工智能发展趋势”），点击 Start Research。
+2.  **获取报告**：研究完成后，根目录会生成 `final_report.md`。
+3.  **导出文档**：在终端运行 `python SuoNian.py`，即可获得 `final_report.docx`。
