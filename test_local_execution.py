@@ -13,10 +13,14 @@ def test_health():
 
 def test_start_experiment():
     url = f"{BASE_URL}/api/experiments/orchestrator/stream"
+    import os
+    from dotenv import load_dotenv
+    load_dotenv()
+    
     payload = {
         "model": "deepseek-chat",
         "task": "Test local execution",
-        "deepseekApiKey": "sk-874b2b02f4724b02b3fd7697742b4d0c"
+        "deepseekApiKey": os.getenv("DEEPSEEK_API_KEY", "your_api_key_here")
     }
     
     print(f"Testing {url} with payload: {payload}")
