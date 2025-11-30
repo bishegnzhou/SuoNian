@@ -1,5 +1,6 @@
 import os
 import sys
+import subprocess
 import threading
 import json
 from typing import Optional, List
@@ -8,11 +9,19 @@ from google import genai
 from google.genai import types
 
 import anthropic
+import openai
+import openai
 
 from logger import print_panel, print_status, log_step, logger
 
-import modal
-from modal.stream_type import StreamType
+try:
+    import modal
+    from modal.stream_type import StreamType
+except (ImportError, RuntimeError) as e:
+    print_status(f"Warning: Modal import failed ({e}). Using mock.", "bold yellow")
+    from unittest.mock import MagicMock
+    modal = MagicMock()
+    StreamType = MagicMock()
 
 # Cache a single sandbox per run so the agent can keep state across tool calls.
 _shared_sandbox: Optional[modal.Sandbox] = None
@@ -72,6 +81,50 @@ def _build_generation_config(
     return types.GenerateContentConfig(**config_kwargs)
 
 
+
+class LocalSandbox:
+    def exec(self, cmd, *args, stdout=None, stderr=None):
+        import subprocess
+        process = subprocess.Popen(
+            [sys.executable, "-u", "-"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=0
+        )
+        return LocalProcess(process)
+
+class LocalProcess:
+    def __init__(self, process):
+        self.process = process
+        self.stdin = LocalStdin(process.stdin)
+        self.stdout = LocalStream(process.stdout)
+        self.stderr = LocalStream(process.stderr)
+    
+    def wait(self):
+        return self.process.wait()
+
+class LocalStdin:
+    def __init__(self, stdin):
+        self.stdin = stdin
+    
+    def write(self, data):
+        self.stdin.write(data)
+    
+    def write_eof(self):
+        self.stdin.close()
+    
+    def drain(self):
+        pass
+
+class LocalStream:
+    def __init__(self, stream):
+        self.stream = stream
+    
+    def __iter__(self):
+        for line in self.stream:
+            yield line.decode("utf-8", errors="replace")
+
 def _get_shared_sandbox(gpu: Optional[str]) -> modal.Sandbox:
     """Create (once) and return a persistent sandbox for this run."""
     global _shared_sandbox, _shared_gpu
@@ -89,31 +142,27 @@ def _get_shared_sandbox(gpu: Optional[str]) -> modal.Sandbox:
         .pip_install("numpy", "pandas", "torch", "scikit-learn", "matplotlib")
     )
 
-    # Create a Modal App to associate with the Sandbox
-    log_step("EXECUTION", "Looking up Modal App 'agent-sandbox-app'...")
-    app = modal.App.lookup("agent-sandbox-app", create_if_missing=True)
-    log_step("EXECUTION", "Modal App found/created.")
+    # Check if we have Modal credentials
+    if not os.environ.get("MODAL_TOKEN_ID") or not os.environ.get("MODAL_TOKEN_SECRET"):
+        print_status("Warning: No Modal credentials found. Using LocalSandbox (subprocess).", "bold yellow")
+        return LocalSandbox()
 
-    # Keep the sandbox alive by running an inert loop; subcommands run via sandbox.exec.
-    gpu_msg = f"gpu={gpu}" if gpu else "cpu-only"
-    log_step("EXECUTION", f"Creating persistent Sandbox (keep-alive loop, {gpu_msg})...")
-    _shared_sandbox = modal.Sandbox.create(
-        "bash",
-        "-lc",
-        "while true; do sleep 3600; done",
-        app=app,
-        image=image,
-        timeout=7200,
-        gpu=gpu,
-    )
-    _shared_gpu = gpu
-    log_step("EXECUTION", "Persistent Sandbox ready.")
-    return _shared_sandbox
-
-
-def _close_shared_sandbox():
-    """Terminate the shared sandbox if it exists."""
-    global _shared_sandbox
+    try:
+        app = modal.App.lookup("ai-researcher-sandbox", create_if_missing=True)
+        
+        # Create the sandbox
+        sandbox = modal.Sandbox.create(
+            image=image,
+            app=app,
+            gpu=gpu,
+            timeout=600,  # 10 minutes
+        )
+        _shared_sandbox = sandbox
+        _shared_gpu = gpu
+        return sandbox
+    except Exception as e:
+        print_status(f"Warning: Failed to create Modal sandbox ({e}). Falling back to LocalSandbox.", "bold yellow")
+        return LocalSandbox()
     if _shared_sandbox is not None:
         try:
             _shared_sandbox.terminate()
@@ -245,7 +294,7 @@ def _build_claude_tool_definition() -> dict:
 
 def _build_system_prompt(gpu_hint: str) -> str:
     """System-level instructions for the Gemini agent."""
-    return f"""You are an autonomous research scientist.
+    prompt = """You are an autonomous research scientist.
 Your job is to rigorously verify the user's hypothesis using experiments
 run in a Python sandbox.
 
@@ -256,102 +305,16 @@ Tool:
   - The code runs as a normal Python script; no need to import `modal`.
 
 Working loop:
-1. **Think before acting.** Plan your next step in natural language.
-   We will show these thoughts in the CLI, so keep them understandable.
-2. **Act with tools.** When you need computation, call `execute_in_sandbox`
-   with a complete, self-contained script.
-3. **Observe and update.** Interpret tool results and decide what to do next.
-4. **Finish clearly.** When you have confidently verified or falsified
-   the hypothesis, write a short natural-language conclusion and then a
-   final line that contains only `[DONE]`.
+1. THINK: Plan the next step.
+2. EXECUTE: Write and run Python code to test the hypothesis.
+3. OBSERVE: Analyze the output.
+4. REPEAT: Iterate until you have a solid conclusion.
+
+Output Format:
+You must output your thoughts and code clearly.
 """
+    return prompt.replace("{gpu_hint}", str(gpu_hint))
 
-
-def run_experiment_loop(hypothesis: str, test_mode: bool = False, model: str = "gemini-3-pro-preview"):
-    """Main agent loop using Gemini 3 Pro or Claude Opus 4.5 with thinking + manual tool calling."""
-    gpu_hint = _selected_gpu or "CPU"
-
-    print_panel(f"Hypothesis: {hypothesis}", "Starting Experiment", "bold green")
-    log_step("START", f"Hypothesis: {hypothesis}")
-    print_status(f"Sandbox GPU request: {gpu_hint}", "info")
-    print_status(f"Model: {model}", "info")
-
-    if test_mode:
-        print_status("TEST MODE ENABLED: Using mock data and skipping LLM calls.", "bold yellow")
-        import time
-        
-        # Mock Agent Loop
-        
-        # Step 1: Thinking
-        thought = (
-            "I need to verify this hypothesis using a Python script.\n"
-            "I will create a synthetic dataset and run a simple regression model.\n"
-            "Then I will analyze the coefficients to check the relationship."
-        )
-        print_panel(thought, "Agent Thinking", "thought")
-        log_step("THOUGHT", thought)
-        emit_event("AGENT_THOUGHT", {"thought": thought})
-        time.sleep(1.5)
-        
-        # Step 2: Tool Call
-        code = (
-            "import numpy as np\n"
-            "import pandas as pd\n"
-            "print('Generating synthetic data...')\n"
-            "data = pd.DataFrame({'x': np.random.rand(100), 'y': np.random.rand(100)})\n"
-            "print('Data shape:', data.shape)\n"
-            "print('Correlation:', data.corr().iloc[0,1])"
-        )
-        fn_name = "execute_in_sandbox"
-        fn_args = {"code": code}
-        
-        print_panel(f"{fn_name}({fn_args})", "Tool Call", "code")
-        log_step("TOOL_CALL", f"{fn_name}({fn_args})")
-        emit_event("AGENT_TOOL", {"tool": fn_name, "args": fn_args})
-        time.sleep(1)
-        
-        # Step 3: Tool Result
-        result = (
-            "Exit Code: 0\n"
-            "STDOUT:\n"
-            "Generating synthetic data...\n"
-            "Data shape: (100, 2)\n"
-            "Correlation: 0.042\n"
-            "STDERR:\n"
-        )
-        print_panel(result, "Tool Result", "result")
-        log_step("TOOL_RESULT", "Executed")
-        emit_event("AGENT_TOOL_RESULT", {"tool": fn_name, "result": result})
-        time.sleep(1.5)
-        
-        # Step 4: Analysis
-        message = (
-            "The correlation is very low, which suggests no strong linear relationship.\n"
-            "However, since this is mock data, I will conclude based on the hypothesis."
-        )
-        print_panel(message, "Agent Message", "info")
-        log_step("MODEL", message)
-        time.sleep(1)
-        
-        # Step 5: Final Report
-        print_status("Generating Final Report...", "bold green")
-        final_report = (
-            "## Experiment Report\n\n"
-            "We tested the hypothesis: " + hypothesis + "\n\n"
-            "### Methodology\n"
-            "We ran a simulation using synthetic data.\n\n"
-            "### Conclusion\n"
-            "The hypothesis was tested in a mock environment.\n"
-            "[DONE]"
-        )
-        print_panel(final_report, "Final Report", "bold green")
-        return
-
-    # Branch based on model selection
-    if model == "claude-opus-4-5":
-        _run_claude_experiment_loop(hypothesis, gpu_hint)
-    else:
-        _run_gemini_experiment_loop(hypothesis, gpu_hint)
 
 
 def _run_claude_experiment_loop(hypothesis: str, gpu_hint: str):
@@ -574,6 +537,210 @@ def _run_claude_experiment_loop(hypothesis: str, gpu_hint: str):
 
         final_report = "\n\n".join(t for t in final_text if t)
         print_panel(final_report, "Final Report", "bold green")
+    finally:
+        _close_shared_sandbox()
+
+
+
+def _build_deepseek_tool_definition() -> dict:
+    """Build the tool definition for DeepSeek (OpenAI compatible)."""
+    return {
+        "type": "function",
+        "function": {
+            "name": "execute_in_sandbox",
+            "description": (
+                "Executes Python code inside a persistent Modal Sandbox. "
+                "The sandbox has numpy, pandas, torch, scikit-learn, and matplotlib installed. "
+                "Returns the exit code, stdout, and stderr from the execution."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "description": "The Python code to execute in the sandbox."
+                    }
+                },
+                "required": ["code"]
+            }
+        }
+    }
+
+
+def _run_deepseek_experiment_loop(hypothesis: str, gpu_hint: str):
+    """Run the experiment loop using DeepSeek Chat."""
+    print_status("DeepSeek Chat enabled", "info")
+
+    client = openai.OpenAI(
+        api_key=os.environ["DEEPSEEK_API_KEY"],
+        base_url="https://api.deepseek.com"
+    )
+    
+    system_prompt = _build_system_prompt(gpu_hint)
+    tools = [_build_deepseek_tool_definition()]
+
+    # Initial conversation with hypothesis
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"Hypothesis: {hypothesis}"}
+    ]
+
+    max_steps = 10
+
+    for step in range(1, max_steps + 1):
+        print_status(f"Step {step}...", "dim")
+
+        try:
+            response = client.chat.completions.create(
+                model="deepseek-chat",
+                messages=messages,
+                tools=tools,
+                stream=True
+            )
+
+            collected_content = []
+            tool_calls = []
+            current_tool_call = None
+
+            print_panel("", "DeepSeek Stream", "dim") # Placeholder for stream start
+
+            for chunk in response:
+                delta = chunk.choices[0].delta
+                
+                # Handle content
+                if delta.content:
+                    content_chunk = delta.content
+                    collected_content.append(content_chunk)
+                    print(content_chunk, end="", flush=True)
+                    emit_event("AGENT_THOUGHT_STREAM", {"chunk": content_chunk})
+
+                # Handle tool calls
+                if delta.tool_calls:
+                    for tc in delta.tool_calls:
+                        if tc.index is not None:
+                            # If we have a new index, it might be a new tool call or continuation
+                            if len(tool_calls) <= tc.index:
+                                tool_calls.append({"id": "", "function": {"name": "", "arguments": ""}})
+                            
+                            current_tool_call = tool_calls[tc.index]
+                            
+                            if tc.id:
+                                current_tool_call["id"] += tc.id
+                            
+                            if tc.function:
+                                if tc.function.name:
+                                    current_tool_call["function"]["name"] += tc.function.name
+                                if tc.function.arguments:
+                                    current_tool_call["function"]["arguments"] += tc.function.arguments
+
+            print() # Newline after stream
+
+            full_content = "".join(collected_content)
+            
+            # Add assistant message to history
+            assistant_msg = {"role": "assistant", "content": full_content}
+            if tool_calls:
+                assistant_msg["tool_calls"] = [
+                    {
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": tc["function"]
+                    } for tc in tool_calls
+                ]
+            messages.append(assistant_msg)
+
+            # Log content
+            if full_content:
+                # Heuristic to separate thought from message if possible, 
+                # but DeepSeek might mix them. We'll just log as MODEL.
+                log_step("MODEL", full_content)
+                
+                if "[DONE]" in full_content:
+                    print_status("Agent signaled completion.", "success")
+                    break
+
+            # Process tool calls
+            if not tool_calls:
+                if not full_content:
+                     print_status("Empty response from DeepSeek.", "warning")
+                else:
+                    print_status("No tool calls in this step.", "info")
+                
+                # If no tool calls and we have content, we continue unless [DONE] was found
+                if "[DONE]" in full_content:
+                    break
+                # If just text and no done, maybe it's asking a question or thinking. 
+                # We'll let it continue but usually the loop expects action.
+                # For now, if no tool call, we might just stop or continue. 
+                # The original logic breaks if no tool calls.
+                if not "[DONE]" in full_content:
+                     print_status("No tool calls and not DONE. Stopping.", "warning")
+                     break
+                continue
+
+            # Execute tool calls
+            for tc in tool_calls:
+                fn_name = tc["function"]["name"]
+                try:
+                    fn_args = json.loads(tc["function"]["arguments"])
+                except json.JSONDecodeError:
+                    fn_args = {}
+                
+                tool_call_id = tc["id"]
+
+                print_panel(f"{fn_name}({fn_args})", "Tool Call", "code")
+                log_step("TOOL_CALL", f"{fn_name}({fn_args})")
+                emit_event("AGENT_TOOL", {"tool": fn_name, "args": fn_args})
+
+                if fn_name == "execute_in_sandbox":
+                    result = execute_in_sandbox(**fn_args)
+                else:
+                    result = f"Unsupported tool '{fn_name}'"
+
+                # Truncate result
+                if len(result) > 20000:
+                    result = result[:10000] + "\n...[TRUNCATED]...\n" + result[-10000:]
+
+                print_panel(result, "Tool Result", "result")
+                log_step("TOOL_RESULT", "Executed")
+                emit_event("AGENT_TOOL_RESULT", {"tool": fn_name, "result": result})
+
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": result
+                })
+
+        except Exception as e:
+            print_status(f"API Error: {e}", "error")
+            logger.error(f"API Error: {e}")
+            break
+
+    # Final report generation
+    try:
+        print_status("Generating Final Report...", "bold green")
+        messages.append({
+            "role": "user",
+            "content": "Generate a concise, information-dense report that explains how you tested the hypothesis, what you observed, and your final conclusion."
+        })
+
+        response = client.chat.completions.create(
+            model="deepseek-chat",
+            messages=messages,
+            stream=True
+        )
+
+        final_content = []
+        for chunk in response:
+            if chunk.choices[0].delta.content:
+                content = chunk.choices[0].delta.content
+                final_content.append(content)
+                print(content, end="", flush=True)
+        
+        print()
+        final_report = "".join(final_content)
+        print_panel(final_report, "Final Report", "bold green")
+
     finally:
         _close_shared_sandbox()
 
@@ -823,3 +990,102 @@ def _run_gemini_experiment_loop(hypothesis: str, gpu_hint: str):
         print_panel(final_text, "Final Report", "bold green")
     finally:
         _close_shared_sandbox()
+
+def _run_deepseek_experiment_loop(hypothesis: str, gpu_hint: str = None):
+    print_status("Starting DeepSeek Experiment...", "bold blue")
+    
+    system_prompt = _build_system_prompt(gpu_hint)
+    
+    client = openai.OpenAI(
+        api_key=os.environ["DEEPSEEK_API_KEY"],
+        base_url="https://api.deepseek.com"
+    )
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"Hypothesis: {hypothesis}"}
+    ]
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "execute_in_sandbox",
+                "description": "Execute Python code in a sandbox environment.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "code": {
+                            "type": "string",
+                            "description": "The Python code to execute."
+                        }
+                    },
+                    "required": ["code"]
+                }
+            }
+        }
+    ]
+
+    while True:
+        try:
+            response = client.chat.completions.create(
+                model="deepseek-chat",
+                messages=messages,
+                tools=tools,
+                stream=False
+            )
+            
+            message = response.choices[0].message
+            messages.append(message)
+
+            if message.content:
+                print_panel(message.content, "DeepSeek Thought", "bold yellow")
+                emit_event("AGENT_THOUGHT", {"thought": message.content})
+
+            if message.tool_calls:
+                for tool_call in message.tool_calls:
+                    fn_name = tool_call.function.name
+                    fn_args = json.loads(tool_call.function.arguments)
+                    
+                    print_panel(f"{fn_name}({fn_args})", "Tool Call", "code")
+                    emit_event("AGENT_TOOL", {"tool": fn_name, "args": fn_args})
+                    
+                    if fn_name == "execute_in_sandbox":
+                        result = execute_in_sandbox(**fn_args)
+                    else:
+                        result = f"Error: Tool {fn_name} not found."
+                    
+                    print_panel(result, "Tool Result", "result")
+                    emit_event("AGENT_TOOL_RESULT", {"tool": fn_name, "result": result})
+                    
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": result
+                    })
+            else:
+                # No tool calls, assume finished
+                print_status("DeepSeek indicated completion.", "success")
+                break
+                
+        except Exception as e:
+            print_status(f"Error in DeepSeek loop: {e}", "bold red")
+            break
+
+def run_experiment_loop(hypothesis: str, test_mode: bool = False, model: str = "gemini-3-pro-preview"):
+    if test_mode:
+        print_status("Running in TEST MODE (Mock)", "bold yellow")
+        return
+
+    gpu_hint = _selected_gpu
+    
+    if model == "deepseek-chat":
+        _run_deepseek_experiment_loop(hypothesis, gpu_hint)
+    elif model == "claude-opus-4-5":
+        if "_run_claude_experiment_loop" in globals():
+             globals()["_run_claude_experiment_loop"](hypothesis, gpu_hint)
+        else:
+             print_status("Claude support not available.", "bold red")
+    else:
+        _run_gemini_experiment_loop(hypothesis, gpu_hint)
+

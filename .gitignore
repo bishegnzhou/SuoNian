@@ -1,0 +1,8 @@
+.env
+agent.log
+server.log
+venv/
+__pycache__/
+*.pyc
+final_report.md
+final_report.docx

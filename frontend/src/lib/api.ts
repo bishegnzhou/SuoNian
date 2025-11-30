@@ -8,6 +8,7 @@ const CREDENTIALS_STORAGE_KEY = "ai_researcher_credentials";
 export interface UserCredentials {
     google_api_key?: string;
     anthropic_api_key?: string;
+    deepseek_api_key?: string;
     modal_token_id?: string;
     modal_token_secret?: string;
 }
@@ -70,12 +71,14 @@ export interface AgentSummaryResponse {
 export interface CredentialStatus {
     hasGoogleApiKey: boolean;
     hasAnthropicApiKey: boolean;
+    hasDeepseekApiKey: boolean;
     hasModalToken: boolean;
 }
 
 export interface CredentialUpdatePayload {
     googleApiKey?: string;
     anthropicApiKey?: string;
+    deepseekApiKey?: string;
     modalTokenId?: string;
     modalTokenSecret?: string;
 }
@@ -100,6 +103,7 @@ export function storeCredentials(creds: CredentialUpdatePayload): void {
     const toStore: UserCredentials = {
         google_api_key: creds.googleApiKey,
         anthropic_api_key: creds.anthropicApiKey,
+        deepseek_api_key: creds.deepseekApiKey,
         modal_token_id: creds.modalTokenId,
         modal_token_secret: creds.modalTokenSecret,
     };
@@ -115,6 +119,7 @@ export function getLocalCredentialStatus(): CredentialStatus {
     return {
         hasGoogleApiKey: Boolean(creds.google_api_key?.trim()),
         hasAnthropicApiKey: Boolean(creds.anthropic_api_key?.trim()),
+        hasDeepseekApiKey: Boolean(creds.deepseek_api_key?.trim()),
         hasModalToken: Boolean(creds.modal_token_id?.trim() && creds.modal_token_secret?.trim()),
     };
 }
@@ -208,6 +213,7 @@ export async function fetchCredentialStatus(): Promise<CredentialStatus> {
             return {
                 hasGoogleApiKey: localStatus.hasGoogleApiKey || Boolean(data.has_google_api_key),
                 hasAnthropicApiKey: localStatus.hasAnthropicApiKey || Boolean(data.has_anthropic_api_key),
+                hasDeepseekApiKey: localStatus.hasDeepseekApiKey || Boolean(data.has_deepseek_api_key),
                 hasModalToken: localStatus.hasModalToken || Boolean(data.has_modal_token),
             };
         }

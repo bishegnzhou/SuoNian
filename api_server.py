@@ -19,6 +19,10 @@ from pydantic import BaseModel, Field
 
 # Load environment variables from the repo's .env file so spawned processes inherit them.
 BASE_DIR = Path(__file__).resolve().parent
+if not (BASE_DIR / "main.py").exists():
+    # Fallback to CWD if __file__ resolution fails (e.g. due to encoding on Windows)
+    BASE_DIR = Path(os.getcwd()).resolve()
+
 ENV_PATH = BASE_DIR / ".env"
 load_dotenv(ENV_PATH)
 
@@ -44,6 +48,7 @@ class UserCredentials(BaseModel):
     anthropic_api_key: Optional[str] = Field(None, description="Anthropic API key")
     modal_token_id: Optional[str] = Field(None, description="Modal token ID")
     modal_token_secret: Optional[str] = Field(None, description="Modal token secret")
+    deepseek_api_key: Optional[str] = Field(None, description="DeepSeek API key")
 
 
 class SingleExperimentRequest(BaseModel):
@@ -77,9 +82,9 @@ class SingleExperimentRequest(BaseModel):
         "gemini-3-pro-preview",
         description=(
             "The LLM model to use for the experiment. "
-            "Options: 'gemini-3-pro-preview' or 'claude-opus-4-5'."
+            "Options: 'gemini-3-pro-preview', 'claude-opus-4-5', or 'deepseek-chat'."
         ),
-        examples=["gemini-3-pro-preview", "claude-opus-4-5"],
+        examples=["gemini-3-pro-preview", "claude-opus-4-5", "deepseek-chat"],
     )
     test_mode: bool = Field(
         False,
@@ -124,9 +129,9 @@ class OrchestratorExperimentRequest(BaseModel):
         "gemini-3-pro-preview",
         description=(
             "The LLM model to use for the experiment. "
-            "Options: 'gemini-3-pro-preview' or 'claude-opus-4-5'."
+            "Options: 'gemini-3-pro-preview', 'claude-opus-4-5', or 'deepseek-chat'."
         ),
-        examples=["gemini-3-pro-preview", "claude-opus-4-5"],
+        examples=["gemini-3-pro-preview", "claude-opus-4-5", "deepseek-chat"],
     )
     num_agents: int = Field(
         3,
@@ -214,6 +219,10 @@ class CredentialStatus(BaseModel):
         ...,
         description="True when both MODAL_TOKEN_ID and MODAL_TOKEN_SECRET are set.",
     )
+    has_deepseek_api_key: bool = Field(
+        ...,
+        description="True when DEEPSEEK_API_KEY is set to a non-placeholder value.",
+    )
 
 
 class CredentialUpdateRequest(BaseModel):
@@ -230,6 +239,9 @@ class CredentialUpdateRequest(BaseModel):
     )
     modal_token_secret: Optional[str] = Field(
         None, description="Modal token secret from https://modal.com/settings/tokens"
+    )
+    deepseek_api_key: Optional[str] = Field(
+        None, description="DeepSeek API key"
     )
 
 
@@ -349,10 +361,12 @@ def _credential_status() -> CredentialStatus:
     has_anthropic = _env_value_present(os.environ.get("ANTHROPIC_API_KEY"))
     has_modal_id = _env_value_present(os.environ.get("MODAL_TOKEN_ID"))
     has_modal_secret = _env_value_present(os.environ.get("MODAL_TOKEN_SECRET"))
+    has_deepseek = _env_value_present(os.environ.get("DEEPSEEK_API_KEY"))
     return CredentialStatus(
         has_google_api_key=has_google,
         has_anthropic_api_key=has_anthropic,
         has_modal_token=has_modal_id and has_modal_secret,
+        has_deepseek_api_key=has_deepseek,
     )
 
 
@@ -517,13 +531,9 @@ def _stream_subprocess(
         }
     """
     _ensure_main_exists()
+    env = os.environ.copy()
 
     started_at = datetime.now(timezone.utc)
-
-    # Enable structured event emission in the child process so the frontend
-    # can consume ::EVENT::-prefixed messages.
-    env = dict(os.environ)
-    env["AI_RESEARCHER_ENABLE_EVENTS"] = "1"
 
     # Override with user-provided credentials if present
     if credentials:
@@ -539,6 +549,9 @@ def _stream_subprocess(
         if credentials.modal_token_secret:
             env["MODAL_TOKEN_SECRET"] = credentials.modal_token_secret
             print(f"[DEBUG] Set MODAL_TOKEN_SECRET from request (len={len(credentials.modal_token_secret)})", file=sys.stderr)
+        if credentials.deepseek_api_key:
+            env["DEEPSEEK_API_KEY"] = credentials.deepseek_api_key
+            print(f"[DEBUG] Set DEEPSEEK_API_KEY from request (len={len(credentials.deepseek_api_key)})", file=sys.stderr)
     else:
         print("[DEBUG] No credentials in request, using environment", file=sys.stderr)
 
@@ -549,6 +562,7 @@ def _stream_subprocess(
         text=True,
         bufsize=1,
         env=env,
+        encoding="utf-8",
     )
 
     # Queue is used to multiplex stdout and stderr into a single ordered stream.
@@ -675,6 +689,8 @@ def update_credentials(req: CredentialUpdateRequest) -> CredentialStatus:
             _persist_env("MODAL_TOKEN_ID", req.modal_token_id.strip())
         if req.modal_token_secret and req.modal_token_secret.strip():
             _persist_env("MODAL_TOKEN_SECRET", req.modal_token_secret.strip())
+        if req.deepseek_api_key and req.deepseek_api_key.strip():
+            _persist_env("DEEPSEEK_API_KEY", req.deepseek_api_key.strip())
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to persist credentials: {e}") from e
 
@@ -820,6 +836,11 @@ if __name__ == "__main__":
 
     port = int(os.environ.get("PORT", 8000))
     reload_enabled = os.environ.get("RAILWAY_ENVIRONMENT") is None  # Disable reload in production
+
+    print("\n" + "="*50)
+    print("Frontend is running at: http://localhost:5173")
+    print("Backend is running at:  http://localhost:8000")
+    print("="*50 + "\n")
 
     uvicorn.run(
         "api_server:app",

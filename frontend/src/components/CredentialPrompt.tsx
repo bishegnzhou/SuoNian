@@ -5,6 +5,7 @@ import { ExternalLink, KeyRound, Loader2, ShieldCheck, Sparkles, X } from "lucid
 export type CredentialFormState = {
     googleApiKey: string;
     anthropicApiKey: string;
+    deepseekApiKey: string;
     modalTokenId: string;
     modalTokenSecret: string;
 };
@@ -12,7 +13,7 @@ export type CredentialFormState = {
 type CredentialPromptProps = {
     open: boolean;
     status: CredentialStatus | null;
-    selectedModel: "gemini-3-pro-preview" | "claude-opus-4-5";
+    selectedModel: "gemini-3-pro-preview" | "claude-opus-4-5" | "deepseek-chat";
     form: CredentialFormState;
     onChange: (field: keyof CredentialFormState, value: string) => void;
     onSubmit: () => void;
@@ -32,39 +33,31 @@ export function CredentialPrompt({
     isSaving,
     error,
 }: CredentialPromptProps) {
-    const googleReady = !!status?.hasGoogleApiKey;
-    const anthropicReady = !!status?.hasAnthropicApiKey;
-    const modalReady = !!status?.hasModalToken;
+    const modalReady = !!form.modalTokenId && !!form.modalTokenSecret;
+    const googleReady = !!form.googleApiKey;
+    const anthropicReady = !!form.anthropicApiKey;
+    const deepseekReady = !!form.deepseekApiKey;
 
-    // Determine which key is needed based on selected model
     const needsGoogleKey = selectedModel === "gemini-3-pro-preview";
     const needsAnthropicKey = selectedModel === "claude-opus-4-5";
+    const needsDeepseekKey = selectedModel === "deepseek-chat";
 
-    const requiredKeyName = needsGoogleKey ? "Google API key" : "Anthropic API key";
-    const hasRequiredKey = needsGoogleKey ? googleReady : anthropicReady;
+    let hasRequiredKey = false;
+    if (needsGoogleKey) hasRequiredKey = googleReady;
+    if (needsAnthropicKey) hasRequiredKey = anthropicReady;
+    if (needsDeepseekKey) hasRequiredKey = deepseekReady;
 
-    const readinessCopy =
-        hasRequiredKey && modalReady
-            ? "All set — keys already saved locally."
-            : `Needed: ${[
-                  !hasRequiredKey ? requiredKeyName : null,
-                  modalReady ? null : "Modal token (id + secret)",
-              ]
-                  .filter(Boolean)
-                  .join(" + ")}`;
+    // If model is not one of the above (e.g. user selected something else or logic changes), 
+    // we might want a fallback. But for now this is fine.
 
-    const googleProvided = !!form.googleApiKey.trim();
-    const anthropicProvided = !!form.anthropicApiKey.trim();
-    const modalProvided = !!form.modalTokenId.trim() && !!form.modalTokenSecret.trim();
+    const disableSubmit = !hasRequiredKey || isSaving;
 
-    // Check if the required key for the selected model is available or provided
-    const hasRequiredLLMKey = needsGoogleKey
-        ? (googleReady || googleProvided)
-        : (anthropicReady || anthropicProvided);
-    const hasModalCredentials = modalReady || modalProvided;
-
-    const disableSubmit =
-        isSaving || !hasRequiredLLMKey || !hasModalCredentials;
+    let readinessCopy = "Please fill in the required keys.";
+    if (disableSubmit) {
+        if (!hasRequiredKey) readinessCopy = "The selected model requires its API key.";
+    } else {
+        readinessCopy = "Ready to launch!";
+    }
 
     return (
         <AnimatePresence>
@@ -98,7 +91,7 @@ export function CredentialPrompt({
                                         Add your API keys to launch the run
                                     </h2>
                                     <p className="text-sm text-white/60 max-w-2xl">
-                                        We need at least one LLM key (Google for Gemini or Anthropic for Claude) and a Modal token pair to spin up research sandboxes. Keys are stored locally in your <code className="px-2 py-1 rounded bg-white/5 text-[11px]">.env</code>.
+                                        We need at least one LLM key (Google, Anthropic, or DeepSeek) and a Modal token pair to spin up research sandboxes. Keys are stored locally in your <code className="px-2 py-1 rounded bg-white/5 text-[11px]">.env</code>.
                                     </p>
                                 </div>
                                 <button
@@ -113,11 +106,11 @@ export function CredentialPrompt({
                             <div className="grid gap-6 md:grid-cols-[1.1fr_1.2fr]">
                                 <div className="space-y-4 rounded-xl border border-white/10 bg-white/5 p-5">
                                     <div className="flex items-center gap-3">
-                                        <ShieldCheck className={`h-5 w-5 ${hasRequiredKey && modalReady ? "text-emerald-400" : "text-amber-300"}`} />
+                                        <ShieldCheck className={`h-5 w-5 ${hasRequiredKey ? "text-emerald-400" : "text-amber-300"}`} />
                                         <div className="flex-1">
                                             <p className="text-sm font-medium text-white">Credentials status</p>
                                             <p className="text-xs text-white/60">
-                                                {hasRequiredKey && modalReady
+                                                {hasRequiredKey
                                                     ? "Ready to launch."
                                                     : "Add the missing keys to continue."}
                                             </p>
@@ -135,7 +128,12 @@ export function CredentialPrompt({
                                             ok={anthropicReady}
                                             required={needsAnthropicKey}
                                         />
-                                        <StatusPill label="Modal token (compute sandbox)" ok={modalReady} required={true} />
+                                        <StatusPill
+                                            label="DeepSeek API key"
+                                            ok={deepseekReady}
+                                            required={needsDeepseekKey}
+                                        />
+                                        <StatusPill label="Modal token (compute sandbox)" ok={modalReady} required={false} />
                                     </div>
 
                                     <div className="grid grid-cols-3 gap-3 pt-1">
@@ -160,6 +158,16 @@ export function CredentialPrompt({
                                             <ExternalLink className="h-3 w-3 text-white/50 group-hover:text-white" />
                                         </a>
                                         <a
+                                            href="https://platform.deepseek.com/api_keys"
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            className="group inline-flex items-center justify-center gap-2 rounded-lg border border-white/15 bg-gradient-to-r from-white/5 to-white/0 px-3 py-3 text-xs font-medium text-white transition hover:border-white/30 hover:from-white/10"
+                                        >
+                                            <Sparkles className="h-4 w-4 text-blue-300" />
+                                            DeepSeek key
+                                            <ExternalLink className="h-3 w-3 text-white/50 group-hover:text-white" />
+                                        </a>
+                                        <a
                                             href="https://modal.com/account/tokens"
                                             target="_blank"
                                             rel="noreferrer"
@@ -173,22 +181,36 @@ export function CredentialPrompt({
                                 </div>
 
                                 <div className="space-y-4 rounded-xl border border-white/10 bg-black/60 p-5">
-                                    <Field
-                                        label="Google API key"
-                                        placeholder="Paste your AI Studio key"
-                                        value={form.googleApiKey}
-                                        onChange={(value) => onChange("googleApiKey", value)}
-                                        status={googleReady ? "ok" : needsGoogleKey ? "missing" : "optional"}
-                                        helper="Used for Gemini 3 Pro (stored locally)."
-                                    />
-                                    <Field
-                                        label="Anthropic API key"
-                                        placeholder="Paste your Anthropic key"
-                                        value={form.anthropicApiKey}
-                                        onChange={(value) => onChange("anthropicApiKey", value)}
-                                        status={anthropicReady ? "ok" : needsAnthropicKey ? "missing" : "optional"}
-                                        helper="Used for Claude Opus 4.5 (stored locally)."
-                                    />
+                                    {(needsGoogleKey || googleReady) && (
+                                        <Field
+                                            label="Google API key"
+                                            placeholder="Paste your AI Studio key"
+                                            value={form.googleApiKey}
+                                            onChange={(value) => onChange("googleApiKey", value)}
+                                            status={googleReady ? "ok" : needsGoogleKey ? "missing" : "optional"}
+                                            helper="Used for Gemini 3 Pro (stored locally)."
+                                        />
+                                    )}
+                                    {(needsAnthropicKey || anthropicReady) && (
+                                        <Field
+                                            label="Anthropic API key"
+                                            placeholder="Paste your Anthropic key"
+                                            value={form.anthropicApiKey}
+                                            onChange={(value) => onChange("anthropicApiKey", value)}
+                                            status={anthropicReady ? "ok" : needsAnthropicKey ? "missing" : "optional"}
+                                            helper="Used for Claude Opus 4.5 (stored locally)."
+                                        />
+                                    )}
+                                    {(needsDeepseekKey || deepseekReady) && (
+                                        <Field
+                                            label="DeepSeek API key"
+                                            placeholder="Paste your DeepSeek key"
+                                            value={form.deepseekApiKey}
+                                            onChange={(value) => onChange("deepseekApiKey", value)}
+                                            status={deepseekReady ? "ok" : needsDeepseekKey ? "missing" : "optional"}
+                                            helper="Used for DeepSeek Chat (stored locally)."
+                                        />
+                                    )}
                                     <Field
                                         label="Modal token ID"
                                         placeholder="modal-token-id"
@@ -256,22 +278,20 @@ function StatusPill({ label, ok, required = true }: StatusPillProps) {
         <div className={`flex items-center justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-2 ${isOptional ? "opacity-50" : ""}`}>
             <span className="text-sm text-white/80">{label}</span>
             <span
-                className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-[11px] font-semibold ${
-                    ok
-                        ? "bg-emerald-500/15 text-emerald-200"
-                        : isOptional
+                className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-[11px] font-semibold ${ok
+                    ? "bg-emerald-500/15 text-emerald-200"
+                    : isOptional
                         ? "bg-white/5 text-white/40"
                         : "bg-amber-500/10 text-amber-200"
-                }`}
+                    }`}
             >
                 <div
-                    className={`h-2 w-2 rounded-full ${
-                        ok
-                            ? "bg-emerald-400 shadow-[0_0_0_4px_rgba(52,211,153,0.2)]"
-                            : isOptional
+                    className={`h-2 w-2 rounded-full ${ok
+                        ? "bg-emerald-400 shadow-[0_0_0_4px_rgba(52,211,153,0.2)]"
+                        : isOptional
                             ? "bg-white/30"
                             : "bg-amber-300 shadow-[0_0_0_4px_rgba(251,191,36,0.25)]"
-                    }`}
+                        }`}
                 />
                 {ok ? "Ready" : isOptional ? "Optional" : "Missing"}
             </span>

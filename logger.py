@@ -4,6 +4,10 @@ from rich.panel import Panel
 from rich.logging import RichHandler
 from rich.theme import Theme
 
+from rich.markup import escape
+
+import sys
+
 # Custom theme for the console
 custom_theme = Theme({
     "info": "dim cyan",
@@ -15,6 +19,14 @@ custom_theme = Theme({
     "result": "white"
 })
 
+# Force UTF-8 on Windows
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+
 console = Console(theme=custom_theme)
 
 def setup_logging():
@@ -23,7 +35,7 @@ def setup_logging():
         level=logging.INFO,
         format="%(asctime)s - %(levelname)s - %(message)s",
         handlers=[
-            logging.FileHandler("agent.log"),
+            logging.FileHandler("agent.log", encoding="utf-8"),
             # We don't add RichHandler here because we want manual control over console output
             # to keep it "elegant" and not just a stream of logs.
         ]
@@ -46,4 +58,4 @@ def print_panel(content, title, style="info"):
 
 def print_status(message, style="info"):
     """Prints a status message."""
-    console.print(f"[{style}]{message}[/{style}]")
+    console.print(f"[{style}]{escape(message)}[/{style}]")

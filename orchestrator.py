@@ -11,6 +11,7 @@ from google import genai
 from google.genai import types
 
 import anthropic
+import openai
 
 from logger import print_panel, print_status, log_step, logger
 
@@ -208,38 +209,14 @@ Important:
 Termination:
 
 - When your final Arxiv-style paper is complete, end your response with a line
-  that contains only:
-  [DONE]
-"""
-
-
-def run_researcher(hypothesis: str, gpu: Optional[str] = None, test_mode: bool = False) -> Dict[str, Any]:
-    """
-    Tool wrapper that launches a single-researcher agent experiment in a separate process.
-
-    This function:
-    - Spawns: `python main.py "<hypothesis>" --mode single [--gpu GPU] [--model MODEL]`
-    - Streams all logs from the underlying agent back to the user's terminal
-      in real time (so all thinking/tool calls are visible).
-    - Captures the full transcript (stdout + stderr) so the orchestrator
-      can feed it back into Gemini.
-
-    Args:
-        hypothesis: The experimental hypothesis to pass to the single agent.
-        gpu: Optional GPU string ("T4", "A10G", "A100", "any", etc.).
-             If None, uses the orchestrator's default GPU (which may be CPU-only).
-        test_mode: If True, runs the agent in test mode (mock data).
-
-    Returns:
-        A JSON-serializable dict:
-            {
+            {{
                 "experiment_id": int,
                 "hypothesis": str,
                 "gpu": Optional[str],
                 "exit_code": int,
                 "transcript": str,
                 "llm_transcript": str,
-            }
+            }}
     """
     global _experiment_counter, _default_gpu, _default_model
 
@@ -408,7 +385,7 @@ def run_orchestrator_loop(
     model: str = "gemini-3-pro-preview",
 ) -> None:
     """
-    Main orchestrator loop using Gemini 3 Pro or Claude Opus 4.5 with thinking + manual tool calling.
+    Main orchestrator loop using Gemini 3 Pro, Claude Opus 4.5, or DeepSeek with thinking + manual tool calling.
 
     Args:
         research_task: High-level research question or task to investigate.
@@ -418,11 +395,13 @@ def run_orchestrator_loop(
         max_parallel_experiments: Maximum number of experiments to run in parallel
                                   in a single wave of tool calls.
         test_mode: If True, runs in test mode with mock data.
-        model: LLM model to use ("gemini-3-pro-preview" or "claude-opus-4-5").
+        model: LLM model to use ("gemini-3-pro-preview" or "claude-opus-4-5" or "deepseek-chat").
     """
     global _default_gpu, _default_model
     _default_gpu = default_gpu
+    _default_gpu = default_gpu
     _default_model = model
+    print(f"[DEBUG] run_orchestrator_loop received model: '{model}'")
 
     print_panel(
         f"Research Task:\n{research_task}",
@@ -530,7 +509,16 @@ def run_orchestrator_loop(
             default_gpu=default_gpu,
             max_parallel_experiments=max_parallel_experiments,
         )
+    elif model == "deepseek-chat":
+        _run_deepseek_orchestrator_loop(
+            research_task=research_task,
+            num_initial_agents=num_initial_agents,
+            max_rounds=max_rounds,
+            default_gpu=default_gpu,
+            max_parallel_experiments=max_parallel_experiments,
+        )
     else:
+        print(f"[DEBUG] Falling back to Gemini. Model was: '{model}' (type: {type(model)})")
         _run_gemini_orchestrator_loop(
             research_task=research_task,
             num_initial_agents=num_initial_agents,
@@ -538,6 +526,319 @@ def run_orchestrator_loop(
             default_gpu=default_gpu,
             max_parallel_experiments=max_parallel_experiments,
         )
+
+
+def _build_deepseek_orchestrator_tool_definition() -> dict:
+    """Build the tool definition for DeepSeek's orchestrator."""
+    return {
+        "type": "function",
+        "function": {
+            "name": "run_researcher",
+            "description": (
+                "Launches an independent single-researcher agent (in its own process) that will "
+                "interpret a hypothesis, plan experiments, run Python code in a Modal sandbox, "
+                "iteratively refine its experiments, and produce a final report explaining "
+                "how it tested the hypothesis and what it found. Returns a JSON object with "
+                "experiment_id, hypothesis, gpu, exit_code, and transcript."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "hypothesis": {
+                        "type": "string",
+                        "description": "The experimental hypothesis to pass to the single agent."
+                    },
+                    "gpu": {
+                        "type": "string",
+                        "description": "Optional GPU string ('T4', 'A10G', 'A100', 'any'). If omitted, uses default."
+                    }
+                },
+                "required": ["hypothesis"]
+            }
+        }
+    }
+
+
+def _run_deepseek_orchestrator_loop(
+    research_task: str,
+    num_initial_agents: int,
+    max_rounds: int,
+    default_gpu: Optional[str],
+    max_parallel_experiments: int,
+) -> None:
+    """Run the orchestrator loop using DeepSeek Chat."""
+    print_status("DeepSeek Chat enabled", "info")
+
+    client = openai.OpenAI(
+        api_key=os.environ["DEEPSEEK_API_KEY"],
+        base_url="https://api.deepseek.com"
+    )
+    
+    system_prompt = _build_orchestrator_system_prompt(
+        num_initial_agents=num_initial_agents,
+        max_rounds=max_rounds,
+        default_gpu_hint=default_gpu,
+        max_parallel_experiments=max_parallel_experiments,
+    )
+
+    # Inject tool calling instructions for DeepSeek
+    system_prompt += (
+        "\n\nTo run a tool, you MUST output a JSON object in a markdown code block like this:\n"
+        "```json\n"
+        "{\n"
+        "  \"function\": \"run_researcher\",\n"
+        "  \"arguments\": {\n"
+        "    \"hypothesis\": \"...\",\n"
+        "    \"gpu\": \"...\"\n"
+        "  }\n"
+        "}\n"
+        "```\n"
+        "You can call multiple tools by outputting multiple JSON blocks.\n"
+        "\nIMPORTANT: All your thoughts, plans, and especially the FINAL REPORT must be written in Chinese (Simplified Chinese).\n"
+    )
+
+    # Initial conversation
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {
+            "role": "user",
+            "content": (
+                "High-level research task:\n"
+                f"{research_task}\n\n"
+                "Begin by decomposing this into concrete hypotheses and planning "
+                "which ones require empirical validation. When appropriate, "
+                "call run_researcher for hypotheses that need experiments."
+            )
+        }
+    ]
+
+    all_experiments: List[Dict[str, Any]] = []
+    max_steps = max(8, max_rounds * 3)
+
+    for step in range(1, max_steps + 1):
+        print_status(f"Orchestrator step {step}...", "dim")
+
+        try:
+            response = client.chat.completions.create(
+                model="deepseek-chat",
+                messages=messages,
+                # tools=tools,  # DeepSeek does not support native tools yet
+                stream=True
+            )
+
+            collected_content = []
+            tool_calls = []
+            current_tool_call = None
+
+            print_panel("", "DeepSeek Stream", "dim")
+
+            for chunk in response:
+                delta = chunk.choices[0].delta
+                
+                # Handle content
+                if delta.content:
+                    content_chunk = delta.content
+                    collected_content.append(content_chunk)
+                    print(content_chunk, end="", flush=True)
+                    emit_event("ORCH_THOUGHT_STREAM", {"chunk": content_chunk})
+
+                # Handle tool calls
+                if delta.tool_calls:
+                    for tc in delta.tool_calls:
+                        if tc.index is not None:
+                            if len(tool_calls) <= tc.index:
+                                tool_calls.append({"id": "", "function": {"name": "", "arguments": ""}})
+                            
+                            current_tool_call = tool_calls[tc.index]
+                            
+                            if tc.id:
+                                current_tool_call["id"] += tc.id
+                            
+                            if tc.function:
+                                if tc.function.name:
+                                    current_tool_call["function"]["name"] += tc.function.name
+                                if tc.function.arguments:
+                                    current_tool_call["function"]["arguments"] += tc.function.arguments
+
+            print()
+
+            full_content = "".join(collected_content)
+            
+            # Add assistant message to history
+            assistant_msg = {"role": "assistant", "content": full_content}
+            # Parse tool calls from content using regex
+            # Look for ```json ... ``` blocks containing "function": "run_researcher"
+            import re
+            json_blocks = re.findall(r"```json\s*(\{.*?\})\s*```", full_content, re.DOTALL)
+            
+            for block in json_blocks:
+                try:
+                    data = json.loads(block)
+                    if data.get("function") == "run_researcher":
+                        tool_calls.append({
+                            "id": f"call_{len(tool_calls)}",
+                            "function": {
+                                "name": "run_researcher",
+                                "arguments": json.dumps(data.get("arguments", {}))
+                            }
+                        })
+                except json.JSONDecodeError:
+                    pass
+
+            # Add assistant message to history
+            assistant_msg = {"role": "assistant", "content": full_content}
+            # We don't add tool_calls to the message history for DeepSeek since we are parsing manually
+            messages.append(assistant_msg)
+
+            # Log content
+            if full_content:
+                log_step("ORCH_MODEL", full_content)
+                
+                if "[DONE]" in full_content:
+                    print_status("Orchestrator signaled completion.", "success")
+                    break
+
+            # Process tool calls
+            if not tool_calls:
+                if not full_content:
+                     print_status("Empty response from DeepSeek.", "warning")
+                else:
+                    print_status("No tool calls in this step.", "info")
+                
+                if "[DONE]" in full_content:
+                    break
+                
+                # If we have content but no tool calls, we continue to let the model think or proceed
+                if full_content:
+                    print_status("Model is thinking...", "dim")
+                    continue
+
+                print_status("No tool calls and no content. Stopping.", "warning")
+                break
+
+            # Execute tool calls in parallel
+            print_status(f"Executing {len(tool_calls)} tool call(s)...", "info")
+            
+            # We only support run_researcher for now
+            futures = []
+            with ThreadPoolExecutor(max_workers=max_parallel_experiments) as executor:
+                for tc in tool_calls:
+                    fn_name = tc["function"]["name"]
+                    try:
+                        fn_args = json.loads(tc["function"]["arguments"])
+                    except json.JSONDecodeError:
+                        fn_args = {}
+                    
+                    tool_call_id = tc["id"]
+                    
+                    if fn_name == "run_researcher":
+                        print_panel(f"run_researcher({fn_args})", "Orchestrator Tool Call", "code")
+                        log_step("ORCH_TOOL_CALL", f"run_researcher({fn_args})")
+                        emit_event("ORCH_TOOL", {"tool": fn_name, "args": fn_args})
+                        
+                        futures.append({
+                            "future": executor.submit(run_researcher, **fn_args, model="deepseek-chat"),
+                            "tool_call_id": tool_call_id,
+                            "fn_name": fn_name
+                        })
+                    else:
+                        # Handle unsupported tools immediately
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call_id,
+                            "content": f"Unsupported tool '{fn_name}'"
+                        })
+
+            # Collect results
+            for item in futures:
+                try:
+                    raw_result = item["future"].result()
+                    # Store full result
+                    all_experiments.append(raw_result)
+                    
+                    # Create slim result for LLM
+                    llm_result = _build_llm_experiment_result(raw_result)
+                    llm_result_str = json.dumps(llm_result, indent=2, ensure_ascii=False)
+                    
+                    print_panel(llm_result_str, "Orchestrator Tool Result", "result")
+                    log_step("ORCH_TOOL_RESULT", "run_researcher completed")
+                    emit_event("ORCH_TOOL_RESULT", {"tool": item["fn_name"], "result": llm_result_str})
+
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": item["tool_call_id"],
+                        "content": llm_result_str
+                    })
+                except Exception as e:
+                    print_status(f"Tool execution error: {e}", "error")
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": item["tool_call_id"],
+                        "content": f"Error executing tool: {e}"
+                    })
+
+        except Exception as e:
+            print_status(f"Orchestrator API Error: {e}", "error")
+            logger.error(f"Orchestrator API Error: {e}")
+            break
+
+    # Safety net: if we exited the loop without an explicit [DONE], ask for the final paper now.
+    print_status(
+        "Orchestrator loop ended. Requesting final paper...",
+        "bold yellow",
+    )
+    messages.append({
+        "role": "user",
+        "content": (
+            "Using everything above (including all transcripts and notes), "
+            "write the final Arxiv-style paper as specified in the system prompt. "
+            "IMPORTANT: The final paper MUST be written in Chinese (Simplified Chinese). "
+            "When you are finished, end with a line containing only [DONE]."
+        )
+    })
+
+    try:
+        response = client.chat.completions.create(
+            model="deepseek-chat",
+            messages=messages,
+            stream=True
+        )
+        
+        final_text = ""
+        print_panel("", "Final Paper Stream", "dim")
+        
+        for chunk in response:
+            if chunk.choices[0].delta.content:
+                content = chunk.choices[0].delta.content
+                final_text += content
+                try:
+                    print(content, end="", flush=True)
+                except UnicodeEncodeError:
+                    # Fallback for Windows consoles that can't handle some chars
+                    try:
+                        print(content.encode(sys.stdout.encoding or 'utf-8', errors='replace').decode(sys.stdout.encoding or 'utf-8'), end="", flush=True)
+                    except:
+                        pass
+                emit_event("ORCH_THOUGHT_STREAM", {"chunk": content})
+        
+        print()
+        
+        # Clean up [DONE]
+        final_text = final_text.replace("[DONE]", "").strip()
+        
+        print_panel(final_text, "Final Paper", "bold green")
+        log_step("ORCH_FINAL", "Final paper generated.")
+        emit_event("ORCH_PAPER", {"content": final_text})
+        
+        # Save to file
+        report_filename = "final_report.md"
+        with open(report_filename, "w", encoding="utf-8") as f:
+            f.write(final_text)
+        print_status(f"Final report saved to {report_filename}", "success")
+        
+    except Exception as e:
+        print_status(f"Failed to generate final paper: {e}", "error")
+        logger.error(f"Failed to generate final paper: {e}")
 
 
 def _build_claude_orchestrator_tool_definition() -> dict:

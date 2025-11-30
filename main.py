@@ -78,15 +78,16 @@ def main():
     parser.add_argument(
         "--model",
         type=str,
-        choices=["gemini-3-pro-preview", "claude-opus-4-5"],
+        choices=["gemini-3-pro-preview", "claude-opus-4-5", "deepseek-chat"],
         default="gemini-3-pro-preview",
         help=(
             "LLM model to use: "
-            "'gemini-3-pro-preview' (default) or 'claude-opus-4-5'."
+            "'gemini-3-pro-preview' (default), 'claude-opus-4-5', or 'deepseek-chat'."
         ),
     )
 
     args = parser.parse_args()
+    print(f"[DEBUG] main.py args: mode={args.mode}, model='{args.model}'", file=sys.stderr)
 
     # Preserve existing behavior by default: single agent mode.
     if args.mode == "single":
@@ -121,7 +122,7 @@ def main():
                 default_gpu=args.gpu,
                 max_parallel_experiments=args.max_parallel,
                 test_mode=args.test_mode,
-                model=args.model,
+                model=args.model.strip() if args.model else "gemini-3-pro-preview",
             )
         except KeyboardInterrupt:
             print_status("\nOrchestrated experiment interrupted by user.", "bold red")
